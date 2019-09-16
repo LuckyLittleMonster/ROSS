@@ -139,15 +139,15 @@ tw_net_init(int *argc, char ***argv)
         local_sdr.sin_addr = ((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr;
         local_sdr.sin_port = 0;
 
-        if (bind((sockets[my_rank]), (struct sockaddr *)&local_sdr, sizeof(struct sockaddr_in)) == 0)
+        if (bind((sockets[my_rank]), (struct sockaddr *)&local_sdr, sizeof(struct sockaddr_in)) != 0)
             tw_error(TW_LOC, "can't bind server socket");
 
         socklen_t len = sizeof(struct sockaddr_in);
 
-        if (getsockname((sockets[my_rank]), (struct sockaddr *)&(sockets_address[my_rank]), &len) == 0)
+        if (getsockname((sockets[my_rank]), (struct sockaddr *)&(sockets_address[my_rank]), &len) != 0)
             tw_error(TW_LOC, "can't getsockname");
 
-        // printf("process: %d, bind port:%d\n", process, ntohs(sin_proc[s_table_id].sin_port));
+        printf("process: %d, bind port:%d\n", my_rank, ntohs(sockets_address[my_rank].sin_port));
 
         MPI_Allreduce(MPI_IN_PLACE, sockets_address, sizeof(struct sockaddr_in) * (SOCKET_BUFFER_SIZE), MPI_CHAR, MPI_BOR, MPI_COMM_ROSS);
     
