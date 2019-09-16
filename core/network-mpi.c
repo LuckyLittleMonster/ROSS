@@ -1,6 +1,18 @@
 #include <ross.h>
 #include <mpi.h>
 
+// for udp
+#include <netdb.h>
+#include <sys/types.h> 
+#include <sys/socket.h>
+#include <sys/resource.h>
+#include <sys/poll.h>
+#include <sys/ioctl.h>
+#include <netinet/in.h>
+#include <net/if.h>
+#include <arpa/inet.h>
+#include <assert.h>
+
 MPI_Comm MPI_COMM_ROSS = MPI_COMM_WORLD;
 int custom_communicator = 0;
 
@@ -29,8 +41,8 @@ struct act_q
 #define INTERFACE_NAME_SIZE 128
 
 static int sockets[SOCKET_BUFFER_SIZE]; // for sockets
-static struct sockaddr_in sockets_address[SOCKET_BUFFE];
-static int local_scoket;
+static struct sockaddr_in sockets_address[SOCKET_BUFFER_SIZE];
+static int local_socket;
 static int processes_per_node = 4;
 
 const char INTERFACE_NAME[INTERFACE_NAME_SIZE][INTERFACE_NAME_SIZE] = {
@@ -101,14 +113,14 @@ tw_net_init(int *argc, char ***argv)
         if (sz > SOCKET_BUFFER_SIZE)
             tw_error(TW_LOC, "MPI_Comm_size is larger than SOCKET_BUFFER_SIZE");
 
-        if ((local_scoket = sockets[my_rank] = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0)) < 0)
+        if ((local_socket = sockets[my_rank] = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0)) < 0)
             tw_error(TW_LOC, "Cannot create socket");
 
         struct ifreq ifr;
         ifr.ifr_addr.sa_family = AF_INET;
         int fd_ip = 0;
-
-        for (int i = 0; i < INTERFACE_NAME_SIZE; ++i)
+	int i;
+        for (i = 0; i < INTERFACE_NAME_SIZE; ++i)
         {
             strncpy(ifr.ifr_name, INTERFACE_NAME[i], IFNAMSIZ-1);
             if (ioctl(sockets[my_rank], SIOCGIFADDR, &ifr) == 0) {
@@ -580,7 +592,7 @@ send_begin(tw_pe *me)
                 return changed;
             }
         } else {
-            if ((int)EVENT_SIZE(e) != (sd = sendto(local_socket, e, (int)EVENT_SIZE(e),, 0, 
+            if ((int)EVENT_SIZE(e) != (sd = sendto(local_socket, e, (int)EVENT_SIZE(e), 0, 
                         &sockets_address[(int)dest_pe], sizeof(struct sockaddr_in)))) {
                 return changed;
             }
