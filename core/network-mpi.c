@@ -43,7 +43,7 @@ struct act_q
 static int sockets[SOCKET_BUFFER_SIZE]; // for sockets
 static struct sockaddr_in sockets_address[SOCKET_BUFFER_SIZE];
 static int local_socket;
-static int processes_per_node = 4;
+static int processes_per_node = 2;
 
 const char INTERFACE_NAME[INTERFACE_NAME_SIZE][INTERFACE_NAME_SIZE] = {
     "em1",
@@ -152,6 +152,26 @@ tw_net_init(int *argc, char ***argv)
         MPI_Allreduce(MPI_IN_PLACE, sockets_address, sizeof(struct sockaddr_in) * (SOCKET_BUFFER_SIZE), MPI_CHAR, MPI_BOR, MPI_COMM_ROSS);
     
         MPI_Barrier(MPI_COMM_ROSS);
+	if (0)	{ 
+		// test
+		// 1 -> 0
+		if (my_rank == 1) {
+			int id = 0;
+			while (1) {sendto(local_socket, &(id), sizeof(int), 0, 
+                        &sockets_address[0], sizeof(struct sockaddr_in));
+			id++;
+			}//printf("send %s\n", t_msg);
+		} 
+		if (my_rank == 0) {
+			int id;
+			int i = 0;
+			while (1) {
+			if (sizeof(int) == recvfrom(local_socket, &id, sizeof(int), 0, NULL, NULL))
+			printf("\r rv: %d -> %d", id, i++);}
+
+		}
+		while(1);
+	}
 
     }
 
@@ -381,6 +401,7 @@ recv_begin(tw_pe *me)
 
     while (posted_recvs.cur < read_buffer)
     {
+	//printf("recv_begin\n");
         unsigned id = posted_recvs.cur;
         int rv; // debug for udp
 
@@ -390,6 +411,7 @@ recv_begin(tw_pe *me)
                     tw_error(TW_LOC, "Out of events in GVT! Consider increasing --extramem");
             return changed;
         }
+	//printf("start recv\n");
 
         if ( MPI_Irecv(e,
                         (int)EVENT_SIZE(e),
@@ -399,19 +421,22 @@ recv_begin(tw_pe *me)
                         MPI_COMM_ROSS,
                         &posted_recvs.req_list[id]) == MPI_SUCCESS)
         {
+	    //printf("mpi_irecv\n");
             posted_recvs.event_list[id] = e;
             posted_recvs.cur++;
             changed = 1;
         }
-        else if ((int)EVENT_SIZE(e) == (rv = recvfrom(local_socket, e, (int)EVENT_SIZE(e), 0,
+        else if (0 && (int)EVENT_SIZE(e) == (rv = recvfrom(local_socket, e, (int)EVENT_SIZE(e), 0,
             NULL, NULL)))
         {
+	    printf("recv\n");
             posted_recvs.event_list[id] = e;
             posted_recvs.cur++;
             changed = 1;
         }
         else
         {
+	    printf("rv: %d, %d, %s\n", rv, errno, strerror(errno));
             tw_event_free(me, e);
             return changed;
         }
@@ -563,6 +588,7 @@ send_begin(tw_pe *me)
 
     while (posted_sends.cur < send_buffer)
     {
+	//printf("send_begin\n");
         tw_event *e = tw_eventq_peek(&outq);
         tw_peid dest_pe;
 
@@ -580,7 +606,7 @@ send_begin(tw_pe *me)
         e->send_pe = (tw_peid) g_tw_mynode;
         e->send_lp = e->src_lp->gid;
 
-        if (e->send_pe / processes_per_node == dest_pe / processes_per_node) {
+        if (1 || e->send_pe / processes_per_node == dest_pe / processes_per_node) {
             // send msg to the same node, use mpi
             if (MPI_Isend(e,
                             (int)EVENT_SIZE(e),
@@ -592,23 +618,32 @@ send_begin(tw_pe *me)
                 return changed;
             }
         } else {
-            if ((int)EVENT_SIZE(e) != (sd = sendto(local_socket, e, (int)EVENT_SIZE(e), 0, 
+	  //  printf("udp send begin\n");
+	  //  posted_sends.req_list[id] = MPI_REQUEST_NULL;
+            while ((int)EVENT_SIZE(e) != (sd = sendto(local_socket, e, (int)EVENT_SIZE(e), 0, 
                         &sockets_address[(int)dest_pe], sizeof(struct sockaddr_in)))) {
-                return changed;
+                // return changed;
+                printf("send error: %i, %s\n", errno, strerror(errno));
             }
-
+		static int count = 3;
+	    if (count -- > 0 )
+	    printf("send: changed: %d\n", changed);
+	    return changed;
         }
 
         tw_eventq_pop(&outq);
         e->state.owner = e->state.cancel_q
                         ? TW_net_acancel
                         : TW_net_asend;
-
+		
+        //if (e->send_pe / processes_per_node == dest_pe / processes_per_node)
+	{
         posted_sends.event_list[id] = e;
         posted_sends.cur++;
         me->s_nwhite_sent++;
 
         changed = 1;
+	}
     }
     return changed;
 }
@@ -685,10 +720,15 @@ service_queues(tw_pe *me)
 {
     int changed;
     do {
+	//printf("service_queues\n");
         changed  = test_q(&posted_recvs, me, recv_finish);
+	//printf("sq_changed: %d\n", changed);
         changed |= test_q(&posted_sends, me, send_finish);
+	//printf("sq_changed: %d\n", changed);
         changed |= recv_begin(me);
+	//printf("sq_changed: %d\n", changed);
         changed |= send_begin(me);
+	//printf("sq_changed: %d\n", changed);
     } while (changed);
 }
 
@@ -701,6 +741,7 @@ service_queues(tw_pe *me)
 void
 tw_net_read(tw_pe *me)
 {
+    //printf("tw_net_read\n");
     service_queues(me);
 }
 
@@ -771,7 +812,7 @@ tw_net_cancel(tw_event *e)
                  "Don't know how to cancel event owned by %u",
                  e->state.owner);
     }
-
+    //printf("tw_net_cancel\n");
     service_queues(src_pe);
 }
 
