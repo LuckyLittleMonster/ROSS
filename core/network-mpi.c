@@ -44,6 +44,7 @@ static int sockets[SOCKET_BUFFER_SIZE]; // for sockets
 static struct sockaddr_in sockets_address[SOCKET_BUFFER_SIZE];
 static int local_socket;
 static int processes_per_node = 2;
+static int send_udp = 0, recv_udp = 0;
 
 const char INTERFACE_NAME[INTERFACE_NAME_SIZE][INTERFACE_NAME_SIZE] = {
     "em1",
@@ -119,7 +120,7 @@ tw_net_init(int *argc, char ***argv)
         struct ifreq ifr;
         ifr.ifr_addr.sa_family = AF_INET;
         int fd_ip = 0;
-	int i;
+        int i;
         for (i = 0; i < INTERFACE_NAME_SIZE; ++i)
         {
             strncpy(ifr.ifr_name, INTERFACE_NAME[i], IFNAMSIZ-1);
@@ -152,26 +153,26 @@ tw_net_init(int *argc, char ***argv)
         MPI_Allreduce(MPI_IN_PLACE, sockets_address, sizeof(struct sockaddr_in) * (SOCKET_BUFFER_SIZE), MPI_CHAR, MPI_BOR, MPI_COMM_ROSS);
     
         MPI_Barrier(MPI_COMM_ROSS);
-	if (0)	{ 
-		// test
-		// 1 -> 0
-		if (my_rank == 1) {
-			int id = 0;
-			while (1) {sendto(local_socket, &(id), sizeof(int), 0, 
-                        &sockets_address[0], sizeof(struct sockaddr_in));
-			id++;
-			}//printf("send %s\n", t_msg);
-		} 
-		if (my_rank == 0) {
-			int id;
-			int i = 0;
-			while (1) {
-			if (sizeof(int) == recvfrom(local_socket, &id, sizeof(int), 0, NULL, NULL))
-			printf("\r rv: %d -> %d", id, i++);}
+        if (0)  { 
+            // test
+                // 1 -> 0
+            if (my_rank == 1) {
+                int id = 0;
+                while (1) {sendto(local_socket, &(id), sizeof(int), 0, 
+                            &sockets_address[0], sizeof(struct sockaddr_in));
+                id++;
+                }//printf("send %s\n", t_msg);
+            } 
+            if (my_rank == 0) {
+                int id;
+                int i = 0;
+                while (1) {
+                if (sizeof(int) == recvfrom(local_socket, &id, sizeof(int), 0, NULL, NULL))
+                printf("\r rv: %d -> %d", id, i++);}
 
-		}
-		while(1);
-	}
+        }
+        while(1);
+    }
 
     }
 
@@ -265,6 +266,15 @@ tw_net_abort(void)
 void
 tw_net_stop(void)
 {
+    if (USE_UDP) {
+        MPI_Allreduce(MPI_IN_PLACE, send_udp, sizeof(int), MPI_INT, MPI_SUM, MPI_COMM_ROSS);
+        MPI_Allreduce(MPI_IN_PLACE, recv_udp, sizeof(int), MPI_INT, MPI_SUM, MPI_COMM_ROSS);
+        // printf("\n");
+
+        MPI_Barrier(MPI_COMM_ROSS);
+
+        if (g_tw_mynode == 0) printf("send_udp: %d, recv_udp: %d\n", send_udp, recv_udp);
+    }
 #ifdef USE_DAMARIS
     if (g_st_damaris_enabled)
         st_damaris_ross_finalize();
@@ -401,7 +411,7 @@ recv_begin(tw_pe *me)
 
     while (posted_recvs.cur < read_buffer)
     {
-	//printf("recv_begin\n");
+        //printf("recv_begin\n");
         unsigned id = posted_recvs.cur;
         int rv; // debug for udp
 
@@ -411,7 +421,17 @@ recv_begin(tw_pe *me)
                     tw_error(TW_LOC, "Out of events in GVT! Consider increasing --extramem");
             return changed;
         }
-	//printf("start recv\n");
+        //printf("start recv\n");
+
+        if ((int)EVENT_SIZE(e) == (rv = recvfrom(local_socket, e, (int)EVENT_SIZE(e), 0,
+            NULL, NULL)))
+        {
+            // printf("recv\n");
+            // posted_recvs.event_list[id] = e;
+            // posted_recvs.cur++;
+            // changed = 1;
+            recv_udp++;
+        }
 
         if ( MPI_Irecv(e,
                         (int)EVENT_SIZE(e),
@@ -421,22 +441,14 @@ recv_begin(tw_pe *me)
                         MPI_COMM_ROSS,
                         &posted_recvs.req_list[id]) == MPI_SUCCESS)
         {
-	    //printf("mpi_irecv\n");
-            posted_recvs.event_list[id] = e;
-            posted_recvs.cur++;
-            changed = 1;
-        }
-        else if (0 && (int)EVENT_SIZE(e) == (rv = recvfrom(local_socket, e, (int)EVENT_SIZE(e), 0,
-            NULL, NULL)))
-        {
-	    printf("recv\n");
+            //printf("mpi_irecv\n");
             posted_recvs.event_list[id] = e;
             posted_recvs.cur++;
             changed = 1;
         }
         else
         {
-	    printf("rv: %d, %d, %s\n", rv, errno, strerror(errno));
+        // printf("rv: %d, %d, %s\n", rv, errno, strerror(errno));
             tw_event_free(me, e);
             return changed;
         }
@@ -588,7 +600,7 @@ send_begin(tw_pe *me)
 
     while (posted_sends.cur < send_buffer)
     {
-	//printf("send_begin\n");
+    //printf("send_begin\n");
         tw_event *e = tw_eventq_peek(&outq);
         tw_peid dest_pe;
 
@@ -606,44 +618,48 @@ send_begin(tw_pe *me)
         e->send_pe = (tw_peid) g_tw_mynode;
         e->send_lp = e->src_lp->gid;
 
-        if (1 || e->send_pe / processes_per_node == dest_pe / processes_per_node) {
+        if (e->send_pe / processes_per_node == dest_pe / processes_per_node) {
             // send msg to the same node, use mpi
-            if (MPI_Isend(e,
-                            (int)EVENT_SIZE(e),
-                            MPI_BYTE,
-                            (int)dest_pe,
-                            EVENT_TAG,
-                            MPI_COMM_ROSS,
-                            &posted_sends.req_list[id]) != MPI_SUCCESS) {
-                return changed;
-            }
+            
         } else {
-	  //  printf("udp send begin\n");
-	  //  posted_sends.req_list[id] = MPI_REQUEST_NULL;
-            while ((int)EVENT_SIZE(e) != (sd = sendto(local_socket, e, (int)EVENT_SIZE(e), 0, 
-                        &sockets_address[(int)dest_pe], sizeof(struct sockaddr_in)))) {
+            // printf("udp send begin\n");
+            // posted_sends.req_list[id] = MPI_REQUEST_NULL;
+            if ((int)EVENT_SIZE(e) == (sd = sendto(local_socket, e, (int)EVENT_SIZE(e), 0, 
+                        &sockets_address[(int)dest_pe], sizeof(struct sockaddr_in)))) 
+            {
+                send_udp++;
                 // return changed;
-                printf("send error: %i, %s\n", errno, strerror(errno));
+                // printf("send error: %i, %s\n", errno, strerror(errno));
             }
-		static int count = 3;
-	    if (count -- > 0 )
-	    printf("send: changed: %d\n", changed);
-	    return changed;
+            // static int count = 3;
+            // if (count -- > 0 )
+            //     printf("send: changed: %d\n", changed);
+            // return changed;
+        }
+
+        if (MPI_Isend(e,
+                        (int)EVENT_SIZE(e),
+                        MPI_BYTE,
+                        (int)dest_pe,
+                        EVENT_TAG,
+                        MPI_COMM_ROSS,
+                        &posted_sends.req_list[id]) != MPI_SUCCESS) {
+            return changed;
         }
 
         tw_eventq_pop(&outq);
         e->state.owner = e->state.cancel_q
                         ? TW_net_acancel
                         : TW_net_asend;
-		
+        
         //if (e->send_pe / processes_per_node == dest_pe / processes_per_node)
-	{
+    {
         posted_sends.event_list[id] = e;
         posted_sends.cur++;
         me->s_nwhite_sent++;
 
         changed = 1;
-	}
+    }
     }
     return changed;
 }
@@ -720,15 +736,15 @@ service_queues(tw_pe *me)
 {
     int changed;
     do {
-	//printf("service_queues\n");
+    //printf("service_queues\n");
         changed  = test_q(&posted_recvs, me, recv_finish);
-	//printf("sq_changed: %d\n", changed);
+    //printf("sq_changed: %d\n", changed);
         changed |= test_q(&posted_sends, me, send_finish);
-	//printf("sq_changed: %d\n", changed);
+    //printf("sq_changed: %d\n", changed);
         changed |= recv_begin(me);
-	//printf("sq_changed: %d\n", changed);
+    //printf("sq_changed: %d\n", changed);
         changed |= send_begin(me);
-	//printf("sq_changed: %d\n", changed);
+    //printf("sq_changed: %d\n", changed);
     } while (changed);
 }
 
