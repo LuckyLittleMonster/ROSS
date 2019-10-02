@@ -36,15 +36,18 @@ struct act_q
 #define EVENT_SIZE(e) g_tw_event_msg_sz
 
 // Author: Huanyi Qin
-#define USE_UDP 1 
+#define USE_UDP 1
 #define SOCKET_BUFFER_SIZE 4096
 #define INTERFACE_NAME_SIZE 128
 
 static int sockets[SOCKET_BUFFER_SIZE]; // for sockets
 static struct sockaddr_in sockets_address[SOCKET_BUFFER_SIZE];
 static int local_socket;
-static int processes_per_node = 2;
-static int send_udp = 0, recv_udp = 0;
+static int processes_per_node = 1;
+static int send_udp = 0; 
+static int recv_udp = 0;
+static udp_send_self = 0;
+
 
 const char INTERFACE_NAME[INTERFACE_NAME_SIZE][INTERFACE_NAME_SIZE] = {
     "em1",
@@ -267,8 +270,10 @@ void
 tw_net_stop(void)
 {
     if (USE_UDP) {
-        MPI_Allreduce(MPI_IN_PLACE, send_udp, sizeof(int), MPI_INT, MPI_SUM, MPI_COMM_ROSS);
-        MPI_Allreduce(MPI_IN_PLACE, recv_udp, sizeof(int), MPI_INT, MPI_SUM, MPI_COMM_ROSS);
+	//printf("start cal\n");
+        //printf("rank: %d, send_udp: %d, recv_udp: %d\n", g_tw_mynode, send_udp, recv_udp);
+        MPI_Allreduce(MPI_IN_PLACE, &recv_udp, 1, MPI_INT, MPI_SUM, MPI_COMM_ROSS);
+        MPI_Allreduce(MPI_IN_PLACE, &send_udp, 1, MPI_INT, MPI_SUM, MPI_COMM_ROSS);
         // printf("\n");
 
         MPI_Barrier(MPI_COMM_ROSS);
@@ -414,6 +419,7 @@ recv_begin(tw_pe *me)
         //printf("recv_begin\n");
         unsigned id = posted_recvs.cur;
         int rv; // debug for udp
+	static int queue_udp = 0;
 
         if (!(e = tw_event_grab(me)))
         {
@@ -423,14 +429,26 @@ recv_begin(tw_pe *me)
         }
         //printf("start recv\n");
 
-        if ((int)EVENT_SIZE(e) == (rv = recvfrom(local_socket, e, (int)EVENT_SIZE(e), 0,
+        if ( USE_UDP && (int)EVENT_SIZE(e) == (rv = recvfrom(local_socket, e, (int)EVENT_SIZE(e), 0,
             NULL, NULL)))
         {
             // printf("recv\n");
-            // posted_recvs.event_list[id] = e;
-            // posted_recvs.cur++;
-            // changed = 1;
-            recv_udp++;
+            // {
+            //     posted_recvs.event_list[id] = e;
+            //     posted_recvs.cur++;
+            //     changed = 1;
+            // }
+            // recv_udp++;
+            // queue_udp++;
+            if (MPI_Isend(e,
+                        (int)EVENT_SIZE(e),
+                        MPI_BYTE,
+                        (int)g_tw_mynode,
+                        EVENT_TAG,
+                        MPI_COMM_ROSS,
+                        MPI_REQUEST_NULL) != MPI_SUCCESS) {
+                // error
+            }
         }
 
         if ( MPI_Irecv(e,
@@ -442,9 +460,24 @@ recv_begin(tw_pe *me)
                         &posted_recvs.req_list[id]) == MPI_SUCCESS)
         {
             //printf("mpi_irecv\n");
-            posted_recvs.event_list[id] = e;
-            posted_recvs.cur++;
-            changed = 1;
+            if (e->send_pe == (tw_peid) g_tw_mynode && udp_send_self > 0) {
+                // recv from self
+                udp_send_self--;
+                
+            } else {
+                posted_recvs.event_list[id] = e;
+                posted_recvs.cur++;
+                changed = 1;
+            }
+            // if () {
+
+            //     queue_udp--;
+            // }
+            // else {
+            //     posted_recvs.event_list[id] = e;
+            //     posted_recvs.cur++;
+            //     changed = 1;
+            // }
         }
         else
         {
@@ -620,32 +653,45 @@ send_begin(tw_pe *me)
 
         if (e->send_pe / processes_per_node == dest_pe / processes_per_node) {
             // send msg to the same node, use mpi
-            
-        } else {
-            // printf("udp send begin\n");
-            // posted_sends.req_list[id] = MPI_REQUEST_NULL;
-            if ((int)EVENT_SIZE(e) == (sd = sendto(local_socket, e, (int)EVENT_SIZE(e), 0, 
-                        &sockets_address[(int)dest_pe], sizeof(struct sockaddr_in)))) 
-            {
-                send_udp++;
-                // return changed;
-                // printf("send error: %i, %s\n", errno, strerror(errno));
-            }
-            // static int count = 3;
-            // if (count -- > 0 )
-            //     printf("send: changed: %d\n", changed);
-            // return changed;
-        }
 
-        if (MPI_Isend(e,
+            if (MPI_Isend(e,
                         (int)EVENT_SIZE(e),
                         MPI_BYTE,
                         (int)dest_pe,
                         EVENT_TAG,
                         MPI_COMM_ROSS,
                         &posted_sends.req_list[id]) != MPI_SUCCESS) {
-            return changed;
+                return changed;
+            }
+            
+        } else {
+            // printf("udp send begin\n");
+            // posted_sends.req_list[id] = MPI_REQUEST_NULL;
+            if (USE_UDP && (int)EVENT_SIZE(e) == (sd = sendto(local_socket, e, (int)EVENT_SIZE(e), 0, 
+                        &sockets_address[(int)dest_pe], sizeof(struct sockaddr_in)))) 
+            {
+                send_udp++;
+                // return changed;
+                // printf("send error: %i, %s\n", errno, strerror(errno));
+            }
+            // send msg to self
+            if (MPI_Isend(e,
+                        (int)EVENT_SIZE(e),
+                        MPI_BYTE,
+                        (int)e->send_pe,
+                        EVENT_TAG,
+                        MPI_COMM_ROSS,
+                        &posted_sends.req_list[id]) != MPI_SUCCESS) {
+                return changed;
+            }
+            udp_send_self++;
+            // static int count = 3;
+            // if (count -- > 0 )
+            //     printf("send: changed: %d\n", changed);
+            // return changed;
         }
+
+        
 
         tw_eventq_pop(&outq);
         e->state.owner = e->state.cancel_q
